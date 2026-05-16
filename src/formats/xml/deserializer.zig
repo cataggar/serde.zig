@@ -1,6 +1,7 @@
 const std = @import("std");
 const scanner_mod = @import("scanner.zig");
 const core_deserialize = @import("../../core/deserialize.zig");
+const kind_mod = @import("../../core/kind.zig");
 
 const Scanner = scanner_mod.Scanner;
 const Token = scanner_mod.Token;
@@ -321,10 +322,17 @@ pub const MapAccess = struct {
         const result = try core_deserialize.deserialize(T, allocator, &deser, .{});
         self.scanner.* = deser.scanner;
 
-        // Consume the closing tag of this child element.
-        const tok = try self.scanner.peek();
-        if (tok == .element_close) {
-            _ = try self.scanner.next();
+        // For container types (struct/union/map) the inner MapAccess already
+        // consumed `</name>` via its own `nextKey` returning null on
+        // `element_close`. For scalars/enums/etc. we still need to consume
+        // the closing tag here. Without this guard the consume would eat the
+        // PARENT's close tag, breaking sibling collection in slices of
+        // structs with nested struct fields (cataggar/serde.zig#3).
+        if (comptime !consumesOwnClose(T)) {
+            const tok = try self.scanner.peek();
+            if (tok == .element_close) {
+                _ = try self.scanner.next();
+            }
         }
 
         return result;
@@ -468,6 +476,19 @@ pub const SeqAccess = struct {
         }
     }
 };
+
+/// True when `core_deserialize.deserialize(T, …)` advances the scanner past
+/// the closing tag of its element (i.e., struct/union/map MapAccess consumes
+/// `</name>` via its own `nextKey` returning null on `element_close`). For
+/// scalar-like types (bool/int/float/string/enum/etc.) the inner deserialize
+/// only reads the inner text content, leaving the close tag to the caller.
+fn consumesOwnClose(comptime T: type) bool {
+    return switch (comptime kind_mod.typeKind(T)) {
+        .@"struct", .@"union", .map => true,
+        .optional => consumesOwnClose(@typeInfo(T).optional.child),
+        else => false,
+    };
+}
 
 fn deserializeFromText(comptime T: type, text: []const u8, allocator: Allocator, borrow: bool) DeserializeError!T {
     const k = comptime @import("../../core/kind.zig").typeKind(T);
