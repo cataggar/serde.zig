@@ -3,6 +3,12 @@
 //! Serialize structs to XML with `toSlice` / `toWriter`, and deserialize
 //! with `fromSlice` / `fromReader`. Supports XML attributes, custom root
 //! element names, pretty-printing, and entity escaping.
+//!
+//! Slice fields are serialized as repeated child elements sharing the
+//! field's name (no `<item>` wrapper). The deserializer collects
+//! consecutive sibling elements whose name matches the field. This makes
+//! shapes like `<Blobs><Blob>…</Blob><Blob>…</Blob></Blobs>` round-trip
+//! when modelled as `struct { Blobs: struct { Blob: []const Blob } }`.
 
 const std = @import("std");
 const compat = @import("compat");
@@ -442,7 +448,7 @@ test "serialize slice" {
     const List = struct { items: []const i32 };
     const bytes = try toSliceWith(testing.allocator, List{ .items = &.{ 1, 2, 3 } }, .{ .xml_declaration = false });
     defer testing.allocator.free(bytes);
-    try testing.expectEqualStrings("<List><items><item>1</item><item>2</item><item>3</item></items></List>", bytes);
+    try testing.expectEqualStrings("<List><items>1</items><items>2</items><items>3</items></List>", bytes);
 }
 
 test "serialize string with entities" {
@@ -702,7 +708,7 @@ test "serialize pretty slice" {
         .indent = 2,
     });
     defer testing.allocator.free(bytes);
-    try testing.expectEqualStrings("<List>\n  <items>\n    <item>1</item>\n    <item>2</item>\n  </items>\n</List>", bytes);
+    try testing.expectEqualStrings("<List>\n  <items>1</items>\n  <items>2</items>\n</List>", bytes);
 }
 
 test "pretty roundtrip" {
@@ -721,7 +727,7 @@ test "deserialize slice" {
     const List = struct { items: []const i32 };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const val = try fromSlice(List, arena.allocator(), "<List><items><item>1</item><item>2</item><item>3</item></items></List>");
+    const val = try fromSlice(List, arena.allocator(), "<List><items>1</items><items>2</items><items>3</items></List>");
     try testing.expectEqual(@as(usize, 3), val.items.len);
     try testing.expectEqual(@as(i32, 1), val.items[0]);
     try testing.expectEqual(@as(i32, 2), val.items[1]);
@@ -742,10 +748,114 @@ test "deserialize string slice" {
     const Tags = struct { tags: []const []const u8 };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const val = try fromSlice(Tags, arena.allocator(), "<Tags><tags><item>a</item><item>b</item></tags></Tags>");
+    const val = try fromSlice(Tags, arena.allocator(), "<Tags><tags>a</tags><tags>b</tags></Tags>");
     try testing.expectEqual(@as(usize, 2), val.tags.len);
     try testing.expectEqualStrings("a", val.tags[0]);
     try testing.expectEqualStrings("b", val.tags[1]);
+}
+
+test "issue#1: no-wrapper repeated children" {
+    const input = "<root><item>a</item><item>b</item></root>";
+    const Root = struct { item: ?[]const []const u8 = null };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try fromSlice(Root, arena.allocator(), input);
+    try testing.expect(r.item != null);
+    try testing.expectEqual(@as(usize, 2), r.item.?.len);
+    try testing.expectEqualStrings("a", r.item.?[0]);
+    try testing.expectEqualStrings("b", r.item.?[1]);
+}
+
+test "issue#1: nested wrapper containing slice of strings" {
+    const input = "<root><items><item>a</item><item>b</item></items></root>";
+    const Items = struct { item: []const []const u8 };
+    const Root = struct { items: ?Items = null };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try fromSlice(Root, arena.allocator(), input);
+    try testing.expect(r.items != null);
+    try testing.expectEqual(@as(usize, 2), r.items.?.item.len);
+    try testing.expectEqualStrings("a", r.items.?.item[0]);
+    try testing.expectEqualStrings("b", r.items.?.item[1]);
+}
+
+test "issue#1: Azure Blob list shape" {
+    const input =
+        "<EnumerationResults><Blobs>" ++
+        "<Blob><Name>a</Name></Blob>" ++
+        "<Blob><Name>b</Name></Blob>" ++
+        "</Blobs></EnumerationResults>";
+    const Blob = struct { Name: []const u8 };
+    const Blobs = struct { Blob: ?[]const Blob = null };
+    const Root = struct { Blobs: ?Blobs = null };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try fromSlice(Root, arena.allocator(), input);
+    try testing.expect(r.Blobs != null);
+    try testing.expect(r.Blobs.?.Blob != null);
+    try testing.expectEqual(@as(usize, 2), r.Blobs.?.Blob.?.len);
+    try testing.expectEqualStrings("a", r.Blobs.?.Blob.?[0].Name);
+    try testing.expectEqualStrings("b", r.Blobs.?.Blob.?[1].Name);
+}
+
+test "slice of structs roundtrip (Azure-style)" {
+    const Blob = struct { Name: []const u8 };
+    const Blobs = struct { Blob: []const Blob };
+    const Root = struct { Blobs: Blobs };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const original = Root{ .Blobs = .{ .Blob = &.{
+        .{ .Name = "a" },
+        .{ .Name = "b" },
+    } } };
+    const bytes = try toSliceWith(arena.allocator(), original, .{ .xml_declaration = false });
+    try testing.expectEqualStrings(
+        "<Root><Blobs><Blob><Name>a</Name></Blob><Blob><Name>b</Name></Blob></Blobs></Root>",
+        bytes,
+    );
+    const result = try fromSlice(Root, arena.allocator(), bytes);
+    try testing.expectEqual(@as(usize, 2), result.Blobs.Blob.len);
+    try testing.expectEqualStrings("a", result.Blobs.Blob[0].Name);
+    try testing.expectEqualStrings("b", result.Blobs.Blob[1].Name);
+}
+
+test "serialize empty slice emits nothing" {
+    const List = struct { items: []const i32 };
+    const bytes = try toSliceWith(testing.allocator, List{ .items = &.{} }, .{ .xml_declaration = false });
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings("<List></List>", bytes);
+}
+
+test "deserialize empty slice from absent field" {
+    const List = struct { items: []const i32 = &.{} };
+    const val = try fromSlice(List, testing.allocator, "<List></List>");
+    try testing.expectEqual(@as(usize, 0), val.items.len);
+}
+
+test "slice of strings roundtrip" {
+    const Tags = struct { tag: []const []const u8 };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const original = Tags{ .tag = &.{ "alpha", "beta", "gamma" } };
+    const bytes = try toSliceWith(arena.allocator(), original, .{ .xml_declaration = false });
+    try testing.expectEqualStrings(
+        "<Tags><tag>alpha</tag><tag>beta</tag><tag>gamma</tag></Tags>",
+        bytes,
+    );
+    const result = try fromSlice(Tags, arena.allocator(), bytes);
+    try testing.expectEqual(@as(usize, 3), result.tag.len);
+    try testing.expectEqualStrings("alpha", result.tag[0]);
+    try testing.expectEqualStrings("beta", result.tag[1]);
+    try testing.expectEqualStrings("gamma", result.tag[2]);
+}
+
+test "single-element slice deserialize" {
+    const List = struct { item: []const i32 };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const val = try fromSlice(List, arena.allocator(), "<List><item>42</item></List>");
+    try testing.expectEqual(@as(usize, 1), val.item.len);
+    try testing.expectEqual(@as(i32, 42), val.item[0]);
 }
 
 test "schema: top-level enum rename deserializes" {

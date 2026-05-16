@@ -227,6 +227,8 @@ pub const MapAccess = struct {
     borrow_strings: bool = false,
     phase: Phase = .attributes,
     pending_attr_value: ?[]const u8 = null,
+    last_key: ?[]const u8 = null,
+    last_was_self_closing: bool = false,
 
     const Phase = enum { attributes, children };
 
@@ -244,6 +246,8 @@ pub const MapAccess = struct {
                 .attribute => {
                     const attr = (try self.scanner.next()).attribute;
                     self.pending_attr_value = attr.value;
+                    self.last_key = attr.name;
+                    self.last_was_self_closing = false;
                     return attr.name;
                 },
                 .tag_end => {
@@ -266,10 +270,14 @@ pub const MapAccess = struct {
             switch (tok) {
                 .element_open => |name| {
                     _ = try self.scanner.next();
+                    self.last_key = name;
+                    self.last_was_self_closing = false;
                     return name;
                 },
                 .self_closing => |name| {
                     _ = try self.scanner.next();
+                    self.last_key = name;
+                    self.last_was_self_closing = true;
                     return name;
                 },
                 .element_close => {
@@ -294,7 +302,21 @@ pub const MapAccess = struct {
             return deserializeFromText(T, val, allocator, self.borrow_strings);
         }
 
-        // Child element value.
+        // Slice / optional-of-slice fields collect consecutive sibling
+        // elements sharing the same name as the just-consumed open tag.
+        const info = @typeInfo(T);
+        if (comptime info == .pointer and info.pointer.size == .slice and info.pointer.child != u8) {
+            return try self.collectRepeatedSiblings(T, allocator);
+        }
+        if (comptime info == .optional) {
+            const Inner = info.optional.child;
+            const inner_info = @typeInfo(Inner);
+            if (comptime inner_info == .pointer and inner_info.pointer.size == .slice and inner_info.pointer.child != u8) {
+                return try self.collectRepeatedSiblings(Inner, allocator);
+            }
+        }
+
+        // Child element value (scalar / struct / non-slice).
         var deser = Deserializer{ .scanner = self.scanner.*, .borrow_strings = self.borrow_strings };
         const result = try core_deserialize.deserialize(T, allocator, &deser, .{});
         self.scanner.* = deser.scanner;
@@ -306,6 +328,67 @@ pub const MapAccess = struct {
         }
 
         return result;
+    }
+
+    /// Collect the current element plus any consecutive sibling elements that
+    /// share `last_key` into a slice. The opening tag of the first element has
+    /// already been consumed by `nextKey`.
+    fn collectRepeatedSiblings(self: *MapAccess, comptime T: type, allocator: Allocator) Error!T {
+        const info = @typeInfo(T);
+        const Child = info.pointer.child;
+        const expected_name = self.last_key orelse return error.MalformedXml;
+
+        var items: std.ArrayList(Child) = .empty;
+        errdefer items.deinit(allocator);
+
+        // First item: its opening tag was already consumed by nextKey, unless
+        // the tag was self-closing (in which case there is nothing to read).
+        if (!self.last_was_self_closing) {
+            const elem = try self.readSliceItem(Child, allocator);
+            items.append(allocator, elem) catch return error.OutOfMemory;
+        } else if (@typeInfo(Child) == .optional) {
+            items.append(allocator, null) catch return error.OutOfMemory;
+        }
+
+        // Additional siblings.
+        while (true) {
+            const tok = try self.scanner.peek();
+            switch (tok) {
+                .element_open => |name| {
+                    if (!std.mem.eql(u8, name, expected_name)) break;
+                    _ = try self.scanner.next();
+                    self.last_was_self_closing = false;
+                    const elem = try self.readSliceItem(Child, allocator);
+                    items.append(allocator, elem) catch return error.OutOfMemory;
+                },
+                .self_closing => |name| {
+                    if (!std.mem.eql(u8, name, expected_name)) break;
+                    _ = try self.scanner.next();
+                    self.last_was_self_closing = true;
+                    if (@typeInfo(Child) == .optional) {
+                        items.append(allocator, null) catch return error.OutOfMemory;
+                    }
+                },
+                .text => {
+                    _ = try self.scanner.next();
+                    continue;
+                },
+                else => break,
+            }
+        }
+
+        return items.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    }
+
+    fn readSliceItem(self: *MapAccess, comptime Child: type, allocator: Allocator) Error!Child {
+        var deser = Deserializer{ .scanner = self.scanner.*, .borrow_strings = self.borrow_strings };
+        const elem = try core_deserialize.deserialize(Child, allocator, &deser, .{});
+        self.scanner.* = deser.scanner;
+        const close = try self.scanner.peek();
+        if (close == .element_close) {
+            _ = try self.scanner.next();
+        }
+        return elem;
     }
 
     pub fn skipValue(self: *MapAccess) Error!void {

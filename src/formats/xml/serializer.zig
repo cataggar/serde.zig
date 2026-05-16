@@ -115,11 +115,9 @@ pub const StructSerializer = struct {
             return;
         }
 
-        // Slice/array: repeated elements.
+        // Slice/array: emit one `<key>…</key>` per element (no wrapper).
+        // String slices are typeKind .string and don't reach this branch.
         if (k == .slice or k == .array) {
-            try self.parent.writeIndent();
-            self.parent.out.writeAll("<" ++ key ++ ">") catch return error.WriteFailed;
-            self.parent.depth += 1;
             const Child = switch (k) {
                 .slice => @typeInfo(T).pointer.child,
                 .array => @typeInfo(T).array.child,
@@ -127,24 +125,18 @@ pub const StructSerializer = struct {
             };
             const child_kind = comptime kind_mod.typeKind(Child);
             for (value) |elem| {
-                if (child_kind == .@"struct") {
-                    try self.parent.writeIndent();
-                    self.parent.out.writeAll("<item>") catch return error.WriteFailed;
+                try self.parent.writeIndent();
+                self.parent.out.writeAll("<" ++ key ++ ">") catch return error.WriteFailed;
+                if (child_kind == .@"struct" or child_kind == .@"union") {
                     self.parent.depth += 1;
                     try core_serialize.serialize(Child, elem, self.parent, .{});
                     self.parent.depth -= 1;
                     try self.parent.writeIndent();
-                    self.parent.out.writeAll("</item>") catch return error.WriteFailed;
                 } else {
-                    try self.parent.writeIndent();
-                    self.parent.out.writeAll("<item>") catch return error.WriteFailed;
                     try core_serialize.serialize(Child, elem, self.parent, .{});
-                    self.parent.out.writeAll("</item>") catch return error.WriteFailed;
                 }
+                self.parent.out.writeAll("</" ++ key ++ ">") catch return error.WriteFailed;
             }
-            self.parent.depth -= 1;
-            try self.parent.writeIndent();
-            self.parent.out.writeAll("</" ++ key ++ ">") catch return error.WriteFailed;
             return;
         }
 
