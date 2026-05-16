@@ -798,6 +798,173 @@ test "issue#1: Azure Blob list shape" {
     try testing.expectEqualStrings("b", r.Blobs.?.Blob.?[1].Name);
 }
 
+test "issue#3: flat children work (control)" {
+    const Blob = struct { Name: []const u8, ETag: []const u8 };
+    const Blobs = struct { Blob: ?[]const Blob = null };
+    const Root = struct { Blobs: ?Blobs = null };
+    const input =
+        "<R><Blobs>" ++
+        "<Blob><Name>a</Name><ETag>e1</ETag></Blob>" ++
+        "<Blob><Name>b</Name><ETag>e2</ETag></Blob>" ++
+        "</Blobs></R>";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try fromSlice(Root, arena.allocator(), input);
+    try testing.expectEqual(@as(usize, 2), r.Blobs.?.Blob.?.len);
+    try testing.expectEqualStrings("a", r.Blobs.?.Blob.?[0].Name);
+    try testing.expectEqualStrings("e1", r.Blobs.?.Blob.?[0].ETag);
+    try testing.expectEqualStrings("b", r.Blobs.?.Blob.?[1].Name);
+    try testing.expectEqualStrings("e2", r.Blobs.?.Blob.?[1].ETag);
+}
+
+test "issue#3: nested struct child breaks sibling collection" {
+    const Props = struct { @"Content-Type": []const u8 };
+    const Blob = struct { Name: []const u8, Properties: Props };
+    const Blobs = struct { Blob: ?[]const Blob = null };
+    const Root = struct { Blobs: ?Blobs = null };
+    const input =
+        "<R><Blobs>" ++
+        "<Blob><Name>a</Name><Properties><Content-Type>x</Content-Type></Properties></Blob>" ++
+        "<Blob><Name>b</Name><Properties><Content-Type>y</Content-Type></Properties></Blob>" ++
+        "</Blobs></R>";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try fromSlice(Root, arena.allocator(), input);
+    try testing.expectEqual(@as(usize, 2), r.Blobs.?.Blob.?.len);
+    try testing.expectEqualStrings("a", r.Blobs.?.Blob.?[0].Name);
+    try testing.expectEqualStrings("x", r.Blobs.?.Blob.?[0].Properties.@"Content-Type");
+    try testing.expectEqualStrings("b", r.Blobs.?.Blob.?[1].Name);
+    try testing.expectEqualStrings("y", r.Blobs.?.Blob.?[1].Properties.@"Content-Type");
+}
+
+test "issue#3: optional-of-struct nested field present" {
+    const Props = struct { @"Content-Type": []const u8 };
+    const Blob = struct { Name: []const u8, Properties: ?Props = null };
+    const Blobs = struct { Blob: ?[]const Blob = null };
+    const Root = struct { Blobs: ?Blobs = null };
+    const input =
+        "<R><Blobs>" ++
+        "<Blob><Name>a</Name><Properties><Content-Type>x</Content-Type></Properties></Blob>" ++
+        "<Blob><Name>b</Name><Properties><Content-Type>y</Content-Type></Properties></Blob>" ++
+        "</Blobs></R>";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try fromSlice(Root, arena.allocator(), input);
+    try testing.expectEqual(@as(usize, 2), r.Blobs.?.Blob.?.len);
+    try testing.expectEqualStrings("x", r.Blobs.?.Blob.?[0].Properties.?.@"Content-Type");
+    try testing.expectEqualStrings("y", r.Blobs.?.Blob.?[1].Properties.?.@"Content-Type");
+}
+
+test "issue#3: two nested struct fields per element" {
+    const Props = struct { @"Content-Type": []const u8 };
+    const Meta = struct { Owner: []const u8 };
+    const Blob = struct { Name: []const u8, Properties: Props, Metadata: Meta };
+    const Blobs = struct { Blob: []const Blob };
+    const Root = struct { Blobs: Blobs };
+    const input =
+        "<Root><Blobs>" ++
+        "<Blob><Name>a</Name><Properties><Content-Type>x</Content-Type></Properties><Metadata><Owner>alice</Owner></Metadata></Blob>" ++
+        "<Blob><Name>b</Name><Properties><Content-Type>y</Content-Type></Properties><Metadata><Owner>bob</Owner></Metadata></Blob>" ++
+        "</Blobs></Root>";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try fromSlice(Root, arena.allocator(), input);
+    try testing.expectEqual(@as(usize, 2), r.Blobs.Blob.len);
+    try testing.expectEqualStrings("alice", r.Blobs.Blob[0].Metadata.Owner);
+    try testing.expectEqualStrings("bob", r.Blobs.Blob[1].Metadata.Owner);
+}
+
+test "issue#3: nested struct field before scalar field" {
+    const Props = struct { @"Content-Type": []const u8 };
+    const Blob = struct { Properties: Props, Name: []const u8 };
+    const Blobs = struct { Blob: []const Blob };
+    const Root = struct { Blobs: Blobs };
+    const input =
+        "<Root><Blobs>" ++
+        "<Blob><Properties><Content-Type>x</Content-Type></Properties><Name>a</Name></Blob>" ++
+        "<Blob><Properties><Content-Type>y</Content-Type></Properties><Name>b</Name></Blob>" ++
+        "</Blobs></Root>";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try fromSlice(Root, arena.allocator(), input);
+    try testing.expectEqual(@as(usize, 2), r.Blobs.Blob.len);
+    try testing.expectEqualStrings("a", r.Blobs.Blob[0].Name);
+    try testing.expectEqualStrings("b", r.Blobs.Blob[1].Name);
+}
+
+test "issue#3: full Azure Blob list shape" {
+    const Props = struct {
+        @"Content-Type": []const u8,
+        @"Content-Length": u64,
+    };
+    const Blob = struct {
+        Name: []const u8,
+        Properties: Props,
+    };
+    const Blobs = struct { Blob: []const Blob };
+    const EnumerationResults = struct { Blobs: Blobs };
+    const input =
+        "<EnumerationResults><Blobs>" ++
+        "<Blob><Name>file1.txt</Name><Properties><Content-Type>text/plain</Content-Type><Content-Length>42</Content-Length></Properties></Blob>" ++
+        "<Blob><Name>file2.png</Name><Properties><Content-Type>image/png</Content-Type><Content-Length>1024</Content-Length></Properties></Blob>" ++
+        "<Blob><Name>file3.bin</Name><Properties><Content-Type>application/octet-stream</Content-Type><Content-Length>0</Content-Length></Properties></Blob>" ++
+        "</Blobs></EnumerationResults>";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try fromSlice(EnumerationResults, arena.allocator(), input);
+    try testing.expectEqual(@as(usize, 3), r.Blobs.Blob.len);
+    try testing.expectEqualStrings("file1.txt", r.Blobs.Blob[0].Name);
+    try testing.expectEqualStrings("text/plain", r.Blobs.Blob[0].Properties.@"Content-Type");
+    try testing.expectEqual(@as(u64, 42), r.Blobs.Blob[0].Properties.@"Content-Length");
+    try testing.expectEqualStrings("file2.png", r.Blobs.Blob[1].Name);
+    try testing.expectEqual(@as(u64, 1024), r.Blobs.Blob[1].Properties.@"Content-Length");
+    try testing.expectEqualStrings("file3.bin", r.Blobs.Blob[2].Name);
+    try testing.expectEqual(@as(u64, 0), r.Blobs.Blob[2].Properties.@"Content-Length");
+}
+
+test "issue#3: Azure Blob list roundtrip" {
+    const Props = struct {
+        @"Content-Type": []const u8,
+        @"Content-Length": u64,
+    };
+    const Blob = struct {
+        Name: []const u8,
+        Properties: Props,
+    };
+    const Blobs = struct { Blob: []const Blob };
+    const EnumerationResults = struct { Blobs: Blobs };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const original = EnumerationResults{ .Blobs = .{ .Blob = &.{
+        .{ .Name = "a", .Properties = .{ .@"Content-Type" = "text/plain", .@"Content-Length" = 1 } },
+        .{ .Name = "b", .Properties = .{ .@"Content-Type" = "image/png", .@"Content-Length" = 2 } },
+    } } };
+    const bytes = try toSliceWith(arena.allocator(), original, .{ .xml_declaration = false });
+    const result = try fromSlice(EnumerationResults, arena.allocator(), bytes);
+    try testing.expectEqual(@as(usize, 2), result.Blobs.Blob.len);
+    try testing.expectEqualStrings("a", result.Blobs.Blob[0].Name);
+    try testing.expectEqualStrings("text/plain", result.Blobs.Blob[0].Properties.@"Content-Type");
+    try testing.expectEqual(@as(u64, 1), result.Blobs.Blob[0].Properties.@"Content-Length");
+    try testing.expectEqualStrings("b", result.Blobs.Blob[1].Name);
+    try testing.expectEqual(@as(u64, 2), result.Blobs.Blob[1].Properties.@"Content-Length");
+}
+
+test "issue#3: nested-then-sibling field in same parent" {
+    // Locks in that a struct child followed by another field in the same
+    // parent works (previously worked by accident — at-end-of-input only).
+    const Inner = struct { val: i32 };
+    const Outer = struct { inner: Inner, name: []const u8 };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const val = try fromSlice(
+        Outer,
+        arena.allocator(),
+        "<Outer><inner><val>42</val></inner><name>after</name></Outer>",
+    );
+    try testing.expectEqual(@as(i32, 42), val.inner.val);
+    try testing.expectEqualStrings("after", val.name);
+}
+
 test "slice of structs roundtrip (Azure-style)" {
     const Blob = struct { Name: []const u8 };
     const Blobs = struct { Blob: []const Blob };
