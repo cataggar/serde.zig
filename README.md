@@ -348,6 +348,8 @@ const user = try serde.xml.fromSlice(User, arena.allocator(), xml_bytes);
 
 Fields listed in `xml_attribute` are serialized as XML attributes on the root element. All other fields become child elements.
 
+Slice fields are serialized as repeated child elements that share the field's name (no `<item>` wrapper). For example, `struct { Blob: []const Blob }` produces `<Blob>…</Blob><Blob>…</Blob>` — matching idiomatic XML formats such as Azure Storage's `<Blobs><Blob>…</Blob>…</Blobs>`. To get a wrapper element, model an intermediate struct, e.g. `struct { Blobs: struct { Blob: []const Blob } }`.
+
 ### ZON
 
 Produces valid `.zon` files:
