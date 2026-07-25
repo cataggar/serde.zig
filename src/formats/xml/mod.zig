@@ -182,6 +182,25 @@ fn writeStructElement(
 
     writer.writeByte('>') catch return error.WriteFailed;
 
+    // Text content: a field marked xml_text is written as the element's text.
+    inline for (info.fields) |field| {
+        if (comptime isXmlText(T, field.name, schema)) {
+            const tv = @field(value, field.name);
+            const TInfo = @typeInfo(field.type);
+            if (TInfo == .optional) {
+                if (tv) |inner| {
+                    var tbuf: [64]u8 = undefined;
+                    const s = fieldToString(TInfo.optional.child, inner, &tbuf);
+                    xml_writer.writeXmlEscaped(writer, s) catch return error.WriteFailed;
+                }
+            } else {
+                var tbuf: [64]u8 = undefined;
+                const s = fieldToString(field.type, tv, &tbuf);
+                xml_writer.writeXmlEscaped(writer, s) catch return error.WriteFailed;
+            }
+        }
+    }
+
     // Children: non-attribute fields.
     var ser = serializer_mod.Serializer.init(writer, opts);
     if (opts.pretty) ser.depth = 1;
@@ -190,6 +209,7 @@ fn writeStructElement(
     inline for (info.fields) |field| {
         if (comptime opt.shouldSkipFieldSchema(T, field.name, .serialize, schema)) continue;
         if (comptime isXmlAttribute(T, field.name, schema)) continue;
+        if (comptime isXmlText(T, field.name, schema)) continue;
 
         if (comptime opt.isFlattenedFieldSchema(T, field.name, schema)) {
             if (@typeInfo(field.type) != .@"struct")
@@ -234,6 +254,11 @@ fn writeStructElement(
 }
 
 fn fieldToString(comptime T: type, value: T, buf: *[64]u8) []const u8 {
+    const tinfo = @typeInfo(T);
+    if (tinfo == .optional) {
+        if (value) |inner| return fieldToString(tinfo.optional.child, inner, buf);
+        return "";
+    }
     const k = comptime kind_mod.typeKind(T);
     return switch (k) {
         .bool => if (value) "true" else "false",
@@ -275,6 +300,20 @@ fn isXmlNameStart(c: u8) bool {
 
 fn isXmlNameChar(c: u8) bool {
     return isXmlNameStart(c) or (c >= '0' and c <= '9') or c == '-' or c == '.';
+}
+
+fn isXmlText(comptime T: type, comptime field_name: []const u8, comptime schema: anytype) bool {
+    const S = @TypeOf(schema);
+    if (S != void) {
+        if (@hasField(S, "xml_text")) {
+            return std.mem.eql(u8, @tagName(schema.xml_text), field_name);
+        }
+    }
+    if (!opt.hasSerdeOptions(T)) return false;
+    const serde = T.serde;
+    const SerdeTy = @TypeOf(serde);
+    if (!@hasField(SerdeTy, "xml_text") and !@hasDecl(SerdeTy, "xml_text")) return false;
+    return std.mem.eql(u8, @tagName(serde.xml_text), field_name);
 }
 
 fn isXmlAttribute(comptime T: type, comptime field_name: []const u8, comptime schema: anytype) bool {
@@ -595,6 +634,46 @@ test "roundtrip with string entities" {
     const bytes = try toSliceWith(arena.allocator(), original, .{ .xml_declaration = false });
     const result = try fromSlice(Msg, arena.allocator(), bytes);
     try testing.expectEqualStrings("a<b&c>d", result.text);
+}
+
+test "deserialize xml_text with optional attribute" {
+    const BlobName = struct {
+        encoded: ?bool = null,
+        content: ?[]const u8 = null,
+        pub const serde = .{
+            .xml_root = "BlobName",
+            .xml_attribute = .{.encoded},
+            .xml_text = .content,
+            .rename = .{ .encoded = "Encoded" },
+        };
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const val = try fromSlice(BlobName, a, "<BlobName Encoded=\"true\">my&amp;blob.txt</BlobName>");
+    try testing.expectEqual(true, val.encoded.?);
+    try testing.expectEqualStrings("my&blob.txt", val.content.?);
+}
+
+test "roundtrip xml_text" {
+    const Named = struct {
+        encoded: ?bool = null,
+        content: ?[]const u8 = null,
+        pub const serde = .{
+            .xml_root = "Name",
+            .xml_attribute = .{.encoded},
+            .xml_text = .content,
+            .rename = .{ .encoded = "Encoded" },
+        };
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const original = Named{ .encoded = true, .content = "hello.txt" };
+    const bytes = try toSliceWith(a, original, .{ .xml_declaration = false });
+    const result = try fromSlice(Named, a, bytes);
+    try testing.expectEqual(true, result.encoded.?);
+    try testing.expectEqualStrings("hello.txt", result.content.?);
 }
 
 test "roundtrip with xml_root and xml_attribute" {

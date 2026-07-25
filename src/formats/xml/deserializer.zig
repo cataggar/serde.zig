@@ -144,8 +144,17 @@ pub const Deserializer = struct {
         }
     }
 
-    pub fn deserializeStruct(self: *Deserializer, comptime _: type) Error!MapAccess {
-        return .{ .scanner = &self.scanner, .borrow_strings = self.borrow_strings, .phase = .attributes };
+    pub fn deserializeStruct(self: *Deserializer, comptime T: type) Error!MapAccess {
+        const text_key: ?[]const u8 = comptime blk: {
+            if (@hasDecl(T, "serde")) {
+                const s = T.serde;
+                if (@hasField(@TypeOf(s), "xml_text")) {
+                    break :blk @tagName(s.xml_text);
+                }
+            }
+            break :blk null;
+        };
+        return .{ .scanner = &self.scanner, .borrow_strings = self.borrow_strings, .phase = .attributes, .text_key = text_key };
     }
 
     pub fn deserializeSeq(self: *Deserializer, comptime T: type, allocator: Allocator) Error!T {
@@ -228,6 +237,8 @@ pub const MapAccess = struct {
     borrow_strings: bool = false,
     phase: Phase = .attributes,
     pending_attr_value: ?[]const u8 = null,
+    pending_text: ?[]const u8 = null,
+    text_key: ?[]const u8 = null,
     last_key: ?[]const u8 = null,
     last_was_self_closing: bool = false,
 
@@ -285,8 +296,20 @@ pub const MapAccess = struct {
                     _ = try self.scanner.next();
                     return null;
                 },
-                .text => {
-                    // Skip whitespace-only text between elements.
+                .text => |txt| {
+                    // Element text content: if this struct declares an xml_text
+                    // field and the text is not whitespace-only, surface it as
+                    // that field's value. Otherwise skip whitespace between
+                    // elements.
+                    if (self.text_key) |tk| {
+                        if (!isWhitespaceOnly(txt)) {
+                            _ = try self.scanner.next();
+                            self.pending_text = txt;
+                            self.last_key = tk;
+                            self.last_was_self_closing = false;
+                            return tk;
+                        }
+                    }
                     _ = try self.scanner.next();
                     continue;
                 },
@@ -301,6 +324,12 @@ pub const MapAccess = struct {
         if (self.pending_attr_value) |val| {
             self.pending_attr_value = null;
             return deserializeFromText(T, val, allocator, self.borrow_strings);
+        }
+
+        // Element text content from pending (xml_text field).
+        if (self.pending_text) |txt| {
+            self.pending_text = null;
+            return deserializeFromText(T, txt, allocator, self.borrow_strings);
         }
 
         // Slice / optional-of-slice fields collect consecutive sibling
@@ -498,7 +527,18 @@ fn consumesOwnClose(comptime T: type) bool {
     };
 }
 
+fn isWhitespaceOnly(text: []const u8) bool {
+    for (text) |c| {
+        if (c != ' ' and c != '\t' and c != '\n' and c != '\r') return false;
+    }
+    return true;
+}
+
 fn deserializeFromText(comptime T: type, text: []const u8, allocator: Allocator, borrow: bool) DeserializeError!T {
+    const info = @typeInfo(T);
+    if (info == .optional) {
+        return try deserializeFromText(info.optional.child, text, allocator, borrow);
+    }
     const k = comptime @import("../../core/kind.zig").typeKind(T);
     if (k == .bool) {
         if (std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "1")) return true;
