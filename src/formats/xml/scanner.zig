@@ -279,9 +279,16 @@ pub const Scanner = struct {
         }
     }
 
-    /// Skip whitespace, XML declarations (<?...?>), and DOCTYPE declarations.
+    /// Skip whitespace, a leading UTF-8 BOM, XML declarations (<?...?>),
+    /// and DOCTYPE declarations.
     fn skipWhitespaceAndDecls(self: *Scanner) void {
         while (self.pos < self.input.len) {
+            // A UTF-8 BOM (EF BB BF) may precede the XML declaration in
+            // responses from some services (e.g. Azure Storage).
+            if (self.startsWith("\xEF\xBB\xBF")) {
+                self.pos += 3;
+                continue;
+            }
             switch (self.input[self.pos]) {
                 ' ', '\t', '\n', '\r' => self.pos += 1,
                 '<' => {

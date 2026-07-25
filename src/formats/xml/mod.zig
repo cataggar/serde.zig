@@ -128,6 +128,7 @@ fn xmlSerialize(
     opts: Options,
     comptime schema: anytype,
 ) !void {
+    @setEvalBranchQuota(1_000_000);
     if (opts.xml_declaration) {
         writer.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>") catch return error.WriteFailed;
         if (opts.pretty) writer.writeByte('\n') catch return error.WriteFailed;
@@ -352,6 +353,7 @@ fn xmlDeserialize(
     borrow: bool,
     comptime schema: anytype,
 ) !T {
+    @setEvalBranchQuota(1_000_000);
     var scanner = scanner_mod.Scanner{ .input = input };
 
     const k = comptime kind_mod.typeKind(T);

@@ -85,8 +85,13 @@ pub const Deserializer = struct {
 
     pub fn deserializeOptional(self: *Deserializer, comptime T: type, allocator: Allocator) Error!?T {
         const tok = try self.scanner.peek();
-        // Self-closing element means null.
-        if (tok == .self_closing) {
+        // An EMPTY-name self_closing token terminates the current element's own
+        // tag (e.g. `<Self attr=".."/>` after its attributes) → the value is
+        // absent → null. A NAMED self_closing token is a CHILD element
+        // (`<Child/>`) belonging to T — the enclosing element had no attributes
+        // so the scanner jumped straight to content. Parsing it as null here
+        // would drop the child and desync sibling collection.
+        if (tok == .self_closing and tok.self_closing.len == 0) {
             _ = try self.scanner.next();
             return null;
         }
@@ -266,9 +271,18 @@ pub const MapAccess = struct {
                     _ = try self.scanner.next();
                     self.phase = .children;
                 },
-                .self_closing => {
-                    _ = try self.scanner.next();
-                    return null;
+                .self_closing => |name| {
+                    // An empty-name self_closing token terminates the CURRENT
+                    // element's own tag (`<Self attr=".."/>` or `<Self/>` after
+                    // its attributes) → this struct is self-closed, no children.
+                    // A NAMED self_closing token is a child element (`<Child/>`):
+                    // the current element had no attributes, so the scanner
+                    // jumped straight to content. Hand it to the children phase.
+                    if (name.len == 0) {
+                        _ = try self.scanner.next();
+                        return null;
+                    }
+                    self.phase = .children;
                 },
                 else => {
                     self.phase = .children;
@@ -344,6 +358,18 @@ pub const MapAccess = struct {
             if (comptime inner_info == .pointer and inner_info.pointer.size == .slice and inner_info.pointer.child != u8) {
                 return try self.collectRepeatedSiblings(Inner, allocator);
             }
+        }
+
+        // A self-closing element (<Foo/>) has no children and no separate
+        // closing tag; nextKey already consumed the whole token. For an
+        // optional field this means "absent" → null. Returning here is
+        // essential: falling through to the generic deserialize below would
+        // read the NEXT sibling (or the parent's close tag for struct fields)
+        // as this field's value, desyncing sibling collection
+        // (e.g. `<OrMetadata/>` before `</Blob>` dropping later `<Blob>`s).
+        if (self.last_was_self_closing and comptime info == .optional) {
+            self.last_was_self_closing = false;
+            return null;
         }
 
         // Child element value (scalar / struct / non-slice).
@@ -439,6 +465,13 @@ pub const MapAccess = struct {
     pub fn skipValue(self: *MapAccess) Error!void {
         if (self.pending_attr_value != null) {
             self.pending_attr_value = null;
+            return;
+        }
+        // A self-closing element (<Foo/>) was fully consumed by nextKey — it
+        // has no separate value or closing tag. Scanning for a matching close
+        // here would consume the ENCLOSING element's close tag and desync.
+        if (self.last_was_self_closing) {
+            self.last_was_self_closing = false;
             return;
         }
         // Skip child element content until its closing tag.
