@@ -1057,3 +1057,36 @@ test "schema: top-level untagged union deserializes" {
     const value = try fromSliceSchema(Scalar, arena.allocator(), "<value>hello</value>", schema);
     try testing.expectEqualStrings("hello", value.string);
 }
+
+test "deserialize element after wrapped struct-slice" {
+    // A struct field whose last member is a slice of structs (a "wrapper"
+    // element containing repeated child structs), followed by a sibling
+    // element. Regression: `readSliceItem` used to consume the wrapper's
+    // closing tag after the last struct item, dropping the trailing sibling
+    // (e.g. Azure blob listing: `<Containers>...</Containers><NextMarker>`).
+    const Item = struct {
+        name: []const u8,
+        pub const serde = .{ .rename = .{ .name = "Name" } };
+    };
+    const Wrap = struct {
+        item: []const Item = &.{},
+        pub const serde = .{ .rename = .{ .item = "Item" } };
+    };
+    const Root = struct {
+        wrap: Wrap = .{},
+        tail: ?[]const u8 = null,
+        pub const serde = .{ .rename = .{ .wrap = "Wrap", .tail = "Tail" } };
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const xml =
+        "<Root><Wrap><Item><Name>a</Name></Item>" ++
+        "<Item><Name>b</Name></Item></Wrap><Tail>done</Tail></Root>";
+    const r = try fromSlice(Root, arena.allocator(), xml);
+    try testing.expectEqual(@as(usize, 2), r.wrap.item.len);
+    try testing.expectEqualStrings("a", r.wrap.item[0].name);
+    try testing.expectEqualStrings("b", r.wrap.item[1].name);
+    try testing.expect(r.tail != null);
+    try testing.expectEqualStrings("done", r.tail.?);
+}

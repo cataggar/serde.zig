@@ -392,9 +392,17 @@ pub const MapAccess = struct {
         var deser = Deserializer{ .scanner = self.scanner.*, .borrow_strings = self.borrow_strings };
         const elem = try core_deserialize.deserialize(Child, allocator, &deser, .{});
         self.scanner.* = deser.scanner;
-        const close = try self.scanner.peek();
-        if (close == .element_close) {
-            _ = try self.scanner.next();
+        // Container children (struct/union/map) consume their own closing tag
+        // via their inner MapAccess. Only consume the close here for
+        // scalars/enums that leave it. Without this guard we would eat the
+        // enclosing wrapper's close tag after the last struct item, dropping
+        // any siblings that follow the wrapper (e.g. `<NextMarker>` after a
+        // `<Containers>` wrapper). Mirrors the guard in `nextValue`.
+        if (comptime !consumesOwnClose(Child)) {
+            const close = try self.scanner.peek();
+            if (close == .element_close) {
+                _ = try self.scanner.next();
+            }
         }
         return elem;
     }
