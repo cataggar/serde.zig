@@ -11,6 +11,7 @@
 //! when modelled as `struct { Blobs: struct { Blob: []const Blob } }`.
 
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const compat = @import("compat");
 const serializer_mod = @import("serializer.zig");
 const deserializer_mod = @import("deserializer.zig");
@@ -166,7 +167,7 @@ fn writeStructElement(
     writer.writeAll(root_name) catch return error.WriteFailed;
 
     // Attributes: fields marked with xml_attribute.
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime opt.shouldSkipFieldSchema(T, field.name, .serialize, schema)) continue;
         if (comptime isXmlAttribute(T, field.name, schema)) {
             writer.writeByte(' ') catch return error.WriteFailed;
@@ -187,7 +188,7 @@ fn writeStructElement(
     if (opts.pretty) ser.depth = 1;
     var ss = try ser.beginStruct();
 
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime opt.shouldSkipFieldSchema(T, field.name, .serialize, schema)) continue;
         if (comptime isXmlAttribute(T, field.name, schema)) continue;
 
@@ -196,7 +197,7 @@ fn writeStructElement(
                 @compileError("Flatten requires a struct type, got " ++ @typeName(field.type));
             const nested = @field(value, field.name);
             const nested_info = @typeInfo(field.type).@"struct";
-            inline for (nested_info.fields) |sf| {
+            inline for (reflection.fields(nested_info)) |sf| {
                 const nested_wire = comptime opt.wireFieldNameForDir(field.type, sf.name, {}, .serialize);
                 try ss.serializeField(nested_wire, @field(nested, sf.name));
             }
@@ -282,7 +283,7 @@ fn isXmlAttribute(comptime T: type, comptime field_name: []const u8, comptime sc
     if (S != void) {
         if (@hasField(S, "xml_attribute")) {
             const attrs = schema.xml_attribute;
-            const attr_fields = @typeInfo(@TypeOf(attrs)).@"struct".fields;
+            const attr_fields = reflection.fields(@typeInfo(@TypeOf(attrs)).@"struct");
             inline for (attr_fields) |f| {
                 const val = @field(attrs, f.name);
                 const tag_name = @tagName(val);
@@ -296,7 +297,7 @@ fn isXmlAttribute(comptime T: type, comptime field_name: []const u8, comptime sc
     const SerdeTy = @TypeOf(serde);
     if (!@hasField(SerdeTy, "xml_attribute") and !@hasDecl(SerdeTy, "xml_attribute")) return false;
     const attrs = serde.xml_attribute;
-    const attr_fields = @typeInfo(@TypeOf(attrs)).@"struct".fields;
+    const attr_fields = reflection.fields(@typeInfo(@TypeOf(attrs)).@"struct");
     inline for (attr_fields) |f| {
         const val = @field(attrs, f.name);
         const tag_name = @tagName(val);
@@ -359,7 +360,7 @@ fn xmlDeserialize(
 fn initStructDefaults(comptime T: type, comptime schema: anytype) !T {
     const info = @typeInfo(T).@"struct";
     var result: T = undefined;
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime field.defaultValue()) |dv| {
             @field(result, field.name) = dv;
         } else if (comptime opt.hasSerdeDefaultSchema(T, field.name, schema)) {

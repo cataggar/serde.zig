@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const kind_mod = @import("kind.zig");
 const options = @import("options.zig");
 const compat = @import("compat");
@@ -72,7 +73,7 @@ pub fn serializeSchema(
 }
 
 fn findOobAdapter(comptime T: type, comptime map: anytype) ?type {
-    inline for (@typeInfo(@TypeOf(map)).@"struct".fields) |field| {
+    inline for (reflection.fields(@typeInfo(@TypeOf(map)).@"struct")) |field| {
         const entry = @field(map, field.name);
         if (entry[0] == T) return entry[1];
     }
@@ -111,7 +112,7 @@ fn serializeStructSchema(comptime T: type, value: T, serializer: anytype, compti
 
     var ss = try serializer.beginStruct();
 
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime options.shouldSkipFieldSchema(T, field.name, .serialize, schema)) continue;
 
         if (comptime options.isFlattenedFieldSchema(T, field.name, schema)) {
@@ -119,7 +120,7 @@ fn serializeStructSchema(comptime T: type, value: T, serializer: anytype, compti
                 @compileError("Flatten requires a struct type, got " ++ @typeName(field.type));
             const nested = @field(value, field.name);
             const nested_info = @typeInfo(field.type).@"struct";
-            inline for (nested_info.fields) |sf| {
+            inline for (reflection.fields(nested_info)) |sf| {
                 const nested_wire = comptime options.wireFieldNameForDir(field.type, sf.name, {}, .serialize);
                 try ss.serializeField(nested_wire, @field(nested, sf.name));
             }
@@ -151,7 +152,7 @@ fn serializeStructSchema(comptime T: type, value: T, serializer: anytype, compti
 fn serializeTupleSchema(comptime T: type, value: T, serializer: anytype, comptime map: anytype) @TypeOf(serializer.*).Error!void {
     const info = @typeInfo(T).@"struct";
     var arr = try serializer.beginArray();
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         try serializeSchema(field.type, @field(value, field.name), &arr, {}, map);
     }
     return arr.end();
@@ -173,7 +174,7 @@ fn serializeUnionSchema(comptime T: type, value: T, serializer: anytype, comptim
 fn serializeUnionExternalSchema(comptime T: type, value: T, serializer: anytype, comptime schema: anytype, comptime map: anytype) @TypeOf(serializer.*).Error!void {
     _ = map;
     const info = @typeInfo(T).@"union";
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (value == @field(T, field.name)) {
             const wire_name = comptime options.wireFieldNameForDir(T, field.name, schema, .serialize);
             if (field.type == void) {
@@ -191,7 +192,7 @@ fn serializeUnionExternalSchema(comptime T: type, value: T, serializer: anytype,
 fn serializeUnionInternalSchema(comptime T: type, value: T, serializer: anytype, comptime schema: anytype) @TypeOf(serializer.*).Error!void {
     const info = @typeInfo(T).@"union";
     const tag_field_name = comptime options.getTagFieldSchema(T, schema);
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (value == @field(T, field.name)) {
             const wire_name = comptime options.wireFieldNameForDir(T, field.name, schema, .serialize);
             var ss = try serializer.beginStruct();
@@ -203,7 +204,7 @@ fn serializeUnionInternalSchema(comptime T: type, value: T, serializer: anytype,
                 if (payload_info != .@"struct")
                     @compileError("Internal tagging requires struct payloads, got " ++ @typeName(field.type));
                 const payload = @field(value, field.name);
-                inline for (payload_info.@"struct".fields) |sf| {
+                inline for (reflection.fields(payload_info.@"struct")) |sf| {
                     try ss.serializeField(sf.name, @field(payload, sf.name));
                 }
                 return ss.end();
@@ -216,7 +217,7 @@ fn serializeUnionAdjacentSchema(comptime T: type, value: T, serializer: anytype,
     const info = @typeInfo(T).@"union";
     const tag_field_name = comptime options.getTagFieldSchema(T, schema);
     const content_field_name = comptime options.getContentFieldSchema(T, schema);
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (value == @field(T, field.name)) {
             const wire_name = comptime options.wireFieldNameForDir(T, field.name, schema, .serialize);
             var ss = try serializer.beginStruct();
@@ -232,7 +233,7 @@ fn serializeUnionAdjacentSchema(comptime T: type, value: T, serializer: anytype,
 
 fn serializeUnionUntaggedSchema(comptime T: type, value: T, serializer: anytype, comptime map: anytype) @TypeOf(serializer.*).Error!void {
     const info = @typeInfo(T).@"union";
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (value == @field(T, field.name)) {
             if (field.type == void) {
                 return serializer.serializeNull();
@@ -247,10 +248,10 @@ fn serializeUnionUntaggedSchema(comptime T: type, value: T, serializer: anytype,
 fn serializeEnumSchema(comptime T: type, value: T, serializer: anytype, comptime schema: anytype) @TypeOf(serializer.*).Error!void {
     if (comptime options.getEnumReprSchema(T, schema) == .integer) {
         const tag_type = @typeInfo(T).@"enum".tag_type;
-        return serializer.serializeInt(@as(tag_type, @intFromEnum(value)));
+        return serializer.serializeInt(@as(tag_type, @backingInt(value)));
     }
-    inline for (@typeInfo(T).@"enum".fields) |field| {
-        if (@intFromEnum(value) == field.value) {
+    inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
+        if (@backingInt(value) == field.value) {
             const wire_name = comptime options.wireFieldNameForDir(T, field.name, schema, .serialize);
             return serializer.serializeString(wire_name);
         }
