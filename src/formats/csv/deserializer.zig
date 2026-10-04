@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const compat = @import("compat");
 const scanner_mod = @import("scanner.zig");
 const core_deserialize = @import("../../core/deserialize.zig");
@@ -169,9 +170,9 @@ fn parseField(comptime T: type, field: Field, allocator: Allocator) DeserializeE
                 const int_val = std.fmt.parseInt(tag_type, trimmed, 10) catch return error.InvalidNumber;
                 return compat.intToEnum(T, int_val) orelse return error.UnexpectedToken;
             }
-            inline for (@typeInfo(T).@"enum".fields) |f| {
+            inline for (reflection.fields(@typeInfo(T).@"enum")) |f| {
                 if (std.mem.eql(u8, trimmed, f.name))
-                    return @enumFromInt(f.value);
+                    return @fromBackingInt(@intCast(f.value));
             }
             return error.UnexpectedToken;
         },
