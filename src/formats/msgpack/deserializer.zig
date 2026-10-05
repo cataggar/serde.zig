@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const core_deserialize = @import("../../core/deserialize.zig");
 
 const Allocator = std.mem.Allocator;
@@ -103,9 +104,9 @@ pub const Deserializer = struct {
         const tag = try self.readByte();
         const len = readStrLen(tag, self) catch return error.WrongType;
         const raw = try self.readSlice(len);
-        inline for (@typeInfo(T).@"enum".fields) |field| {
+        inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
             if (std.mem.eql(u8, raw, field.name))
-                return @enumFromInt(field.value);
+                return @fromBackingInt(@intCast(field.value));
         }
         return error.UnexpectedTag;
     }
@@ -127,7 +128,7 @@ pub const Deserializer = struct {
                     self.pos = saved;
                     return error.WrongType;
                 };
-                inline for (info.fields) |field| {
+                inline for (reflection.fields(info)) |field| {
                     if (field.type == void and std.mem.eql(u8, name, field.name)) {
                         return @unionInit(T, field.name, {});
                     }
@@ -145,7 +146,7 @@ pub const Deserializer = struct {
         const key_len = readStrLen(key_tag, self) catch return error.WrongType;
         const variant_name = try self.readSlice(key_len);
 
-        inline for (info.fields) |field| {
+        inline for (reflection.fields(info)) |field| {
             if (std.mem.eql(u8, variant_name, field.name)) {
                 if (field.type == void) {
                     const nil_tag = try self.readByte();

@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const serde = @import("serde");
-const options = @import("bench_options");
+var options: BenchConfig = .{};
 
 const Allocator = std.mem.Allocator;
 const compat = serde.compat;
@@ -134,7 +134,7 @@ const BenchResult = struct {
     mode: Mode,
     zig_version: std.SemanticVersion,
     target: []const u8,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     iterations: usize,
     ns_per_op: f64,
     allocations_per_op: f64,
@@ -191,8 +191,10 @@ const CountingAllocator = struct {
     }
 };
 
-pub fn main() !void {
-    const gpa = std.heap.page_allocator;
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    options = parseBenchArgs(args[1..]);
 
     const format = parseOutputFormat(options.format) orelse {
         std.debug.print("unsupported --format '{s}', expected text or json\n", .{options.format});
@@ -729,4 +731,66 @@ test "baseline lookup parses ns_per_op" {
     const json = "{\"schema_version\":1,\"results\":[{\"id\":\"json.flat.serialize.serde.warm\",\"implementation\":\"serde\",\"ns_per_op\":123.5}]}";
     const ns = findBaselineNs(json, "json.flat.serialize.serde.warm", "serde").?;
     try std.testing.expectEqual(@as(f64, 123.5), ns);
+}
+
+const BenchConfig = struct {
+    format: []const u8 = "text",
+    filter: []const u8 = "",
+    compare_std_json: bool = false,
+    baseline: []const u8 = "",
+    threshold_percent: f64 = 10.0,
+    out: []const u8 = "",
+};
+
+fn parseBenchArgs(args: []const []const u8) BenchConfig {
+    var config = BenchConfig{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--format")) {
+            i += 1;
+            if (i >= args.len) @panic("--format requires a value");
+            config.format = args[i];
+        } else if (std.mem.eql(u8, arg, "--filter")) {
+            i += 1;
+            if (i >= args.len) @panic("--filter requires a value");
+            config.filter = args[i];
+        } else if (std.mem.eql(u8, arg, "--compare")) {
+            i += 1;
+            if (i >= args.len) @panic("--compare requires a value");
+            if (std.mem.eql(u8, args[i], "std_json")) {
+                config.compare_std_json = true;
+            } else {
+                @panic("unsupported --compare value; expected std_json");
+            }
+        } else if (std.mem.eql(u8, arg, "--baseline")) {
+            i += 1;
+            if (i >= args.len) @panic("--baseline requires a value");
+            config.baseline = args[i];
+        } else if (std.mem.eql(u8, arg, "--threshold")) {
+            i += 1;
+            if (i >= args.len) @panic("--threshold requires a value");
+            config.threshold_percent = std.fmt.parseFloat(f64, args[i]) catch @panic("invalid --threshold value");
+        } else if (std.mem.eql(u8, arg, "--out")) {
+            i += 1;
+            if (i >= args.len) @panic("--out requires a value");
+            config.out = args[i];
+        } else {
+            @panic("unknown benchmark argument");
+        }
+    }
+    return config;
+}
+
+test "passthrough benchmark arguments retain filtering comparison and output options" {
+    const parsed = parseBenchArgs(&.{
+        "--format",   "json",          "--filter",    "warm", "--compare", "std_json",
+        "--baseline", "previous.json", "--threshold", "12.5", "--out",     "result.json",
+    });
+    try std.testing.expectEqualStrings("json", parsed.format);
+    try std.testing.expectEqualStrings("warm", parsed.filter);
+    try std.testing.expect(parsed.compare_std_json);
+    try std.testing.expectEqualStrings("previous.json", parsed.baseline);
+    try std.testing.expectEqual(@as(f64, 12.5), parsed.threshold_percent);
+    try std.testing.expectEqualStrings("result.json", parsed.out);
 }

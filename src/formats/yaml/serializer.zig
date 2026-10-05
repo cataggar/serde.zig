@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const compat = @import("compat");
 const core_serialize = @import("../../core/serialize.zig");
 const kind_mod = @import("../../core/kind.zig");
@@ -354,7 +355,7 @@ fn nullReprString(repr: Options.NullRepr) []const u8 {
 fn unionHasPayload(comptime T: type) bool {
     const info = @typeInfo(T);
     if (info != .@"union") return false;
-    for (info.@"union".fields) |field| {
+    for (reflection.fields(info.@"union")) |field| {
         if (field.type != void) return true;
     }
     return false;

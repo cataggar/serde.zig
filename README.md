@@ -2,7 +2,7 @@
 
 [![Build](https://github.com/OrlovEvgeny/serde.zig/actions/workflows/ci.yml/badge.svg)](https://github.com/OrlovEvgeny/serde.zig/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/OrlovEvgeny/serde.zig?label=release)](https://github.com/OrlovEvgeny/serde.zig/releases/latest)
-[![Zig](https://img.shields.io/badge/zig-0.15.2%20%7C%200.16.0-blue)](https://ziglang.org/download/)
+[![Zig](https://img.shields.io/badge/zig-0.17.0-blue)](https://ziglang.org/download/)
 
 Serialization framework for Zig
 
