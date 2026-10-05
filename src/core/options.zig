@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const rename_mod = @import("../helpers/rename.zig");
 
 pub const NamingConvention = rename_mod.NamingConvention;
@@ -241,7 +242,7 @@ pub fn countSerializableFields(comptime T: type) usize {
 pub fn countSerializableFieldsSchema(comptime T: type, comptime schema: anytype) usize {
     const info = @typeInfo(T).@"struct";
     var count: usize = 0;
-    for (info.fields) |field| {
+    for (reflection.fields(info)) |field| {
         if (!shouldSkipFieldSchema(T, field.name, .serialize, schema))
             count += 1;
     }

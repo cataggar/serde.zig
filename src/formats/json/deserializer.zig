@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const scanner_mod = @import("scanner.zig");
 const core_deserialize = @import("../../core/deserialize.zig");
 
@@ -153,9 +154,9 @@ pub const Deserializer = struct {
         const tok = try self.scanner.next();
         switch (tok) {
             .string => |raw| {
-                inline for (@typeInfo(T).@"enum".fields) |field| {
+                inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
                     if (std.mem.eql(u8, raw, field.name))
-                        return @enumFromInt(field.value);
+                        return @fromBackingInt(@intCast(field.value));
                 }
                 return error.UnexpectedToken;
             },
@@ -169,7 +170,7 @@ pub const Deserializer = struct {
         if (tok == .string) {
             const str_tok = try self.scanner.next();
             const name = str_tok.string;
-            inline for (info.fields) |field| {
+            inline for (reflection.fields(info)) |field| {
                 if (field.type == void and std.mem.eql(u8, name, field.name)) {
                     return @unionInit(T, field.name, {});
                 }
@@ -184,7 +185,7 @@ pub const Deserializer = struct {
         const variant_name = key_tok.string;
         try self.scanner.expectColon();
 
-        inline for (info.fields) |field| {
+        inline for (reflection.fields(info)) |field| {
             if (std.mem.eql(u8, variant_name, field.name)) {
                 if (field.type == void) {
                     const val_tok = try self.scanner.next();

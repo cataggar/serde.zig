@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const scanner_mod = @import("scanner.zig");
 const core_deserialize = @import("../../core/deserialize.zig");
 const kind_mod = @import("../../core/kind.zig");
@@ -100,9 +101,9 @@ pub const Deserializer = struct {
 
     pub fn deserializeEnum(self: *Deserializer, comptime T: type) Error!T {
         const text = try self.readTextContent();
-        inline for (@typeInfo(T).@"enum".fields) |field| {
+        inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
             if (std.mem.eql(u8, text, field.name))
-                return @enumFromInt(field.value);
+                return @fromBackingInt(@intCast(field.value));
         }
         return error.UnexpectedToken;
     }
@@ -113,7 +114,7 @@ pub const Deserializer = struct {
         const tok = try self.scanner.next();
         switch (tok) {
             .element_open => |name| {
-                inline for (info.fields) |field| {
+                inline for (reflection.fields(info)) |field| {
                     if (std.mem.eql(u8, name, field.name)) {
                         if (field.type == void) {
                             // Consume until closing tag.
@@ -129,7 +130,7 @@ pub const Deserializer = struct {
                 return error.UnexpectedToken;
             },
             .self_closing => |name| {
-                inline for (info.fields) |field| {
+                inline for (reflection.fields(info)) |field| {
                     if (field.type == void and std.mem.eql(u8, name, field.name)) {
                         return @unionInit(T, field.name, {});
                     }
@@ -138,7 +139,7 @@ pub const Deserializer = struct {
             },
             .text => |text| {
                 // Try to match as a void variant by name.
-                inline for (info.fields) |field| {
+                inline for (reflection.fields(info)) |field| {
                     if (field.type == void and std.mem.eql(u8, text, field.name)) {
                         return @unionInit(T, field.name, {});
                     }
@@ -590,9 +591,9 @@ fn deserializeFromText(comptime T: type, text: []const u8, allocator: Allocator,
         }
         return Scanner.unescapeEntities(allocator, text) catch error.MalformedXml;
     } else if (k == .@"enum") {
-        inline for (@typeInfo(T).@"enum".fields) |field| {
+        inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
             if (std.mem.eql(u8, text, field.name))
-                return @enumFromInt(field.value);
+                return @fromBackingInt(@intCast(field.value));
         }
         return error.UnexpectedToken;
     } else {

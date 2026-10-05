@@ -5,6 +5,7 @@
 //! (TSV, Excel, Unix) and BOM handling.
 
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const compat = @import("compat");
 const scanner_mod = @import("scanner.zig");
 const serializer_mod = @import("serializer.zig");
@@ -163,7 +164,7 @@ pub fn fromReaderSchema(comptime T: type, allocator: std.mem.Allocator, reader: 
 
 fn writeHeaderRowSchema(comptime T: type, ser: *Serializer, comptime schema: anytype) SerializeError!void {
     const info = @typeInfo(T).@"struct";
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime options.shouldSkipFieldSchema(T, field.name, .serialize, schema)) continue;
         const wire_name = comptime options.wireFieldNameForDir(T, field.name, schema, .serialize);
         try ser.serializeString(wire_name);
@@ -225,7 +226,7 @@ pub fn fromSliceWith(comptime T: type, allocator: std.mem.Allocator, input: []co
 
 fn writeHeaderRow(comptime T: type, ser: *Serializer) SerializeError!void {
     const info = @typeInfo(T).@"struct";
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime options.shouldSkipField(T, field.name, .serialize)) continue;
         const wire_name = comptime options.wireFieldNameForDir(T, field.name, {}, .serialize);
         try ser.serializeString(wire_name);
