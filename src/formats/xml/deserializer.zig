@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const scanner_mod = @import("scanner.zig");
 const core_deserialize = @import("../../core/deserialize.zig");
 const kind_mod = @import("../../core/kind.zig");
@@ -85,8 +86,13 @@ pub const Deserializer = struct {
 
     pub fn deserializeOptional(self: *Deserializer, comptime T: type, allocator: Allocator) Error!?T {
         const tok = try self.scanner.peek();
-        // Self-closing element means null.
-        if (tok == .self_closing) {
+        // An EMPTY-name self_closing token terminates the current element's own
+        // tag (e.g. `<Self attr=".."/>` after its attributes) → the value is
+        // absent → null. A NAMED self_closing token is a CHILD element
+        // (`<Child/>`) belonging to T — the enclosing element had no attributes
+        // so the scanner jumped straight to content. Parsing it as null here
+        // would drop the child and desync sibling collection.
+        if (tok == .self_closing and tok.self_closing.len == 0) {
             _ = try self.scanner.next();
             return null;
         }
@@ -95,9 +101,9 @@ pub const Deserializer = struct {
 
     pub fn deserializeEnum(self: *Deserializer, comptime T: type) Error!T {
         const text = try self.readTextContent();
-        inline for (@typeInfo(T).@"enum".fields) |field| {
+        inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
             if (std.mem.eql(u8, text, field.name))
-                return @enumFromInt(field.value);
+                return @fromBackingInt(@intCast(field.value));
         }
         return error.UnexpectedToken;
     }
@@ -108,7 +114,7 @@ pub const Deserializer = struct {
         const tok = try self.scanner.next();
         switch (tok) {
             .element_open => |name| {
-                inline for (info.fields) |field| {
+                inline for (reflection.fields(info)) |field| {
                     if (std.mem.eql(u8, name, field.name)) {
                         if (field.type == void) {
                             // Consume until closing tag.
@@ -124,7 +130,7 @@ pub const Deserializer = struct {
                 return error.UnexpectedToken;
             },
             .self_closing => |name| {
-                inline for (info.fields) |field| {
+                inline for (reflection.fields(info)) |field| {
                     if (field.type == void and std.mem.eql(u8, name, field.name)) {
                         return @unionInit(T, field.name, {});
                     }
@@ -133,7 +139,7 @@ pub const Deserializer = struct {
             },
             .text => |text| {
                 // Try to match as a void variant by name.
-                inline for (info.fields) |field| {
+                inline for (reflection.fields(info)) |field| {
                     if (field.type == void and std.mem.eql(u8, text, field.name)) {
                         return @unionInit(T, field.name, {});
                     }
@@ -144,8 +150,17 @@ pub const Deserializer = struct {
         }
     }
 
-    pub fn deserializeStruct(self: *Deserializer, comptime _: type) Error!MapAccess {
-        return .{ .scanner = &self.scanner, .borrow_strings = self.borrow_strings, .phase = .attributes };
+    pub fn deserializeStruct(self: *Deserializer, comptime T: type) Error!MapAccess {
+        const text_key: ?[]const u8 = comptime blk: {
+            if (@hasDecl(T, "serde")) {
+                const s = T.serde;
+                if (@hasField(@TypeOf(s), "xml_text")) {
+                    break :blk @tagName(s.xml_text);
+                }
+            }
+            break :blk null;
+        };
+        return .{ .scanner = &self.scanner, .borrow_strings = self.borrow_strings, .phase = .attributes, .text_key = text_key };
     }
 
     pub fn deserializeSeq(self: *Deserializer, comptime T: type, allocator: Allocator) Error!T {
@@ -228,6 +243,8 @@ pub const MapAccess = struct {
     borrow_strings: bool = false,
     phase: Phase = .attributes,
     pending_attr_value: ?[]const u8 = null,
+    pending_text: ?[]const u8 = null,
+    text_key: ?[]const u8 = null,
     last_key: ?[]const u8 = null,
     last_was_self_closing: bool = false,
 
@@ -255,9 +272,18 @@ pub const MapAccess = struct {
                     _ = try self.scanner.next();
                     self.phase = .children;
                 },
-                .self_closing => {
-                    _ = try self.scanner.next();
-                    return null;
+                .self_closing => |name| {
+                    // An empty-name self_closing token terminates the CURRENT
+                    // element's own tag (`<Self attr=".."/>` or `<Self/>` after
+                    // its attributes) → this struct is self-closed, no children.
+                    // A NAMED self_closing token is a child element (`<Child/>`):
+                    // the current element had no attributes, so the scanner
+                    // jumped straight to content. Hand it to the children phase.
+                    if (name.len == 0) {
+                        _ = try self.scanner.next();
+                        return null;
+                    }
+                    self.phase = .children;
                 },
                 else => {
                     self.phase = .children;
@@ -285,8 +311,20 @@ pub const MapAccess = struct {
                     _ = try self.scanner.next();
                     return null;
                 },
-                .text => {
-                    // Skip whitespace-only text between elements.
+                .text => |txt| {
+                    // Element text content: if this struct declares an xml_text
+                    // field and the text is not whitespace-only, surface it as
+                    // that field's value. Otherwise skip whitespace between
+                    // elements.
+                    if (self.text_key) |tk| {
+                        if (!isWhitespaceOnly(txt)) {
+                            _ = try self.scanner.next();
+                            self.pending_text = txt;
+                            self.last_key = tk;
+                            self.last_was_self_closing = false;
+                            return tk;
+                        }
+                    }
                     _ = try self.scanner.next();
                     continue;
                 },
@@ -303,6 +341,12 @@ pub const MapAccess = struct {
             return deserializeFromText(T, val, allocator, self.borrow_strings);
         }
 
+        // Element text content from pending (xml_text field).
+        if (self.pending_text) |txt| {
+            self.pending_text = null;
+            return deserializeFromText(T, txt, allocator, self.borrow_strings);
+        }
+
         // Slice / optional-of-slice fields collect consecutive sibling
         // elements sharing the same name as the just-consumed open tag.
         const info = @typeInfo(T);
@@ -315,6 +359,18 @@ pub const MapAccess = struct {
             if (comptime inner_info == .pointer and inner_info.pointer.size == .slice and inner_info.pointer.child != u8) {
                 return try self.collectRepeatedSiblings(Inner, allocator);
             }
+        }
+
+        // A self-closing element (<Foo/>) has no children and no separate
+        // closing tag; nextKey already consumed the whole token. For an
+        // optional field this means "absent" → null. Returning here is
+        // essential: falling through to the generic deserialize below would
+        // read the NEXT sibling (or the parent's close tag for struct fields)
+        // as this field's value, desyncing sibling collection
+        // (e.g. `<OrMetadata/>` before `</Blob>` dropping later `<Blob>`s).
+        if (self.last_was_self_closing and comptime info == .optional) {
+            self.last_was_self_closing = false;
+            return null;
         }
 
         // Child element value (scalar / struct / non-slice).
@@ -392,9 +448,17 @@ pub const MapAccess = struct {
         var deser = Deserializer{ .scanner = self.scanner.*, .borrow_strings = self.borrow_strings };
         const elem = try core_deserialize.deserialize(Child, allocator, &deser, .{});
         self.scanner.* = deser.scanner;
-        const close = try self.scanner.peek();
-        if (close == .element_close) {
-            _ = try self.scanner.next();
+        // Container children (struct/union/map) consume their own closing tag
+        // via their inner MapAccess. Only consume the close here for
+        // scalars/enums that leave it. Without this guard we would eat the
+        // enclosing wrapper's close tag after the last struct item, dropping
+        // any siblings that follow the wrapper (e.g. `<NextMarker>` after a
+        // `<Containers>` wrapper). Mirrors the guard in `nextValue`.
+        if (comptime !consumesOwnClose(Child)) {
+            const close = try self.scanner.peek();
+            if (close == .element_close) {
+                _ = try self.scanner.next();
+            }
         }
         return elem;
     }
@@ -402,6 +466,13 @@ pub const MapAccess = struct {
     pub fn skipValue(self: *MapAccess) Error!void {
         if (self.pending_attr_value != null) {
             self.pending_attr_value = null;
+            return;
+        }
+        // A self-closing element (<Foo/>) was fully consumed by nextKey — it
+        // has no separate value or closing tag. Scanning for a matching close
+        // here would consume the ENCLOSING element's close tag and desync.
+        if (self.last_was_self_closing) {
+            self.last_was_self_closing = false;
             return;
         }
         // Skip child element content until its closing tag.
@@ -490,7 +561,18 @@ fn consumesOwnClose(comptime T: type) bool {
     };
 }
 
+fn isWhitespaceOnly(text: []const u8) bool {
+    for (text) |c| {
+        if (c != ' ' and c != '\t' and c != '\n' and c != '\r') return false;
+    }
+    return true;
+}
+
 fn deserializeFromText(comptime T: type, text: []const u8, allocator: Allocator, borrow: bool) DeserializeError!T {
+    const info = @typeInfo(T);
+    if (info == .optional) {
+        return try deserializeFromText(info.optional.child, text, allocator, borrow);
+    }
     const k = comptime @import("../../core/kind.zig").typeKind(T);
     if (k == .bool) {
         if (std.mem.eql(u8, text, "true") or std.mem.eql(u8, text, "1")) return true;
@@ -509,9 +591,9 @@ fn deserializeFromText(comptime T: type, text: []const u8, allocator: Allocator,
         }
         return Scanner.unescapeEntities(allocator, text) catch error.MalformedXml;
     } else if (k == .@"enum") {
-        inline for (@typeInfo(T).@"enum".fields) |field| {
+        inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
             if (std.mem.eql(u8, text, field.name))
-                return @enumFromInt(field.value);
+                return @fromBackingInt(@intCast(field.value));
         }
         return error.UnexpectedToken;
     } else {

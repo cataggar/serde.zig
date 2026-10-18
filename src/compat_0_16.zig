@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+pub const reflection = @import("reflection.zig");
 
 comptime {
     const v = builtin.zig_version;

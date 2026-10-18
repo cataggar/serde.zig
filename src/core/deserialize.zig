@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const compat = @import("compat");
 const kind_mod = @import("kind.zig");
 const opts = @import("options.zig");
@@ -73,7 +74,7 @@ pub fn deserializeSchema(
 }
 
 fn findOobAdapter(comptime T: type, comptime map: anytype) ?type {
-    inline for (@typeInfo(@TypeOf(map)).@"struct".fields) |field| {
+    inline for (reflection.fields(@typeInfo(@TypeOf(map)).@"struct")) |field| {
         const entry = @field(map, field.name);
         if (entry[0] == T) return entry[1];
     }
@@ -94,9 +95,9 @@ fn deserializeEnumSchema(comptime T: type, allocator: Allocator, deserializer: a
     // With rename/alias: read string and match in core.
     const name = try deserializer.deserializeString(allocator);
     defer freeAllocated([]const u8, name, allocator);
-    inline for (@typeInfo(T).@"enum".fields) |field| {
+    inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
         if (opts.matchesDeserializeName(T, field.name, name, schema)) {
-            return @enumFromInt(field.value);
+            return @fromBackingInt(@intCast(field.value));
         }
     }
     return deserializer.raiseError(error.UnexpectedToken);
@@ -144,12 +145,12 @@ fn deserializeTupleSchema(
     const info = @typeInfo(T).@"struct";
     var result: T = undefined;
     var seq = try deserializer.deserializeSeqAccess();
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         @field(result, field.name) = try seq.nextElement(field.type, allocator) orelse
             return deserializer.raiseError(error.UnexpectedEof);
     }
-    if (info.fields.len > 0) {
-        if (try seq.nextElement(info.fields[0].type, allocator) != null)
+    if (reflection.fields(info).len > 0) {
+        if (try seq.nextElement(reflection.fields(info)[0].type, allocator) != null)
             return deserializer.raiseError(error.UnexpectedToken);
     }
     return result;
@@ -169,7 +170,7 @@ fn freeAllocated(comptime T: type, value: T, allocator: Allocator) void {
             allocator.destroy(value);
         },
         .@"struct" => {
-            inline for (@typeInfo(T).@"struct".fields) |field| {
+            inline for (reflection.fields(@typeInfo(T).@"struct")) |field| {
                 freeAllocated(field.type, @field(value, field.name), allocator);
             }
         },
@@ -188,7 +189,7 @@ fn freeAllocated(comptime T: type, value: T, allocator: Allocator) void {
 
 fn freeStructFields(comptime T: type, result: *T, fields_seen: anytype, allocator: Allocator) void {
     const info = @typeInfo(T).@"struct";
-    inline for (info.fields, 0..) |field, i| {
+    inline for (reflection.fields(info), 0..) |field, i| {
         if (fields_seen.isSet(i)) {
             freeAllocated(field.type, @field(result, field.name), allocator);
         }
@@ -206,10 +207,10 @@ fn deserializeStructFieldsSchema(
     const info = @typeInfo(T).@"struct";
 
     var result: T = undefined;
-    var fields_seen = std.StaticBitSet(info.fields.len).initEmpty();
+    var fields_seen = std.StaticBitSet(reflection.fields(info).len).empty;
     errdefer freeStructFields(T, &result, fields_seen, allocator);
 
-    inline for (info.fields, 0..) |field, i| {
+    inline for (reflection.fields(info), 0..) |field, i| {
         if (comptime opts.shouldSkipFieldSchema(T, field.name, .deserialize, schema)) {
             if (comptime field.defaultValue()) |dv| {
                 @field(result, field.name) = dv;
@@ -244,7 +245,7 @@ fn deserializeStructFieldsSchema(
     while (try map.nextKey(allocator)) |key| {
         var matched = false;
 
-        inline for (info.fields, 0..) |field, i| {
+        inline for (reflection.fields(info), 0..) |field, i| {
             if (comptime opts.shouldSkipFieldSchema(T, field.name, .deserialize, schema)) continue;
             if (comptime opts.isFlattenedFieldSchema(T, field.name, schema)) continue;
 
@@ -262,10 +263,10 @@ fn deserializeStructFieldsSchema(
         }
 
         if (!matched) {
-            inline for (info.fields) |field| {
+            inline for (reflection.fields(info)) |field| {
                 if (comptime opts.isFlattenedFieldSchema(T, field.name, schema)) {
                     const nested_info = @typeInfo(field.type).@"struct";
-                    inline for (nested_info.fields) |sf| {
+                    inline for (reflection.fields(nested_info)) |sf| {
                         if (opts.matchesDeserializeName(field.type, sf.name, key, {})) {
                             @field(@field(result, field.name), sf.name) = try map.nextValue(sf.type, allocator);
                             matched = true;
@@ -284,7 +285,7 @@ fn deserializeStructFieldsSchema(
     }
 
     // Validate required fields. Flattened fields already initialized above.
-    inline for (info.fields, 0..) |field, i| {
+    inline for (reflection.fields(info), 0..) |field, i| {
         if (comptime opts.isFlattenedFieldSchema(T, field.name, schema)) continue;
         if (!fields_seen.isSet(i)) {
             if (@typeInfo(field.type) == .optional) {
@@ -301,7 +302,7 @@ fn deserializeStructFieldsSchema(
 fn initWithDefaults(comptime T: type) T {
     const info = @typeInfo(T).@"struct";
     var result: T = undefined;
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime field.defaultValue()) |dv| {
             @field(result, field.name) = dv;
         } else if (@typeInfo(field.type) == .optional) {
@@ -344,7 +345,7 @@ fn deserializeUnionExternalSchema(
         const saved = deserializer.*;
         if (deserializer.deserializeString(allocator)) |name| {
             defer freeAllocated([]const u8, name, allocator);
-            inline for (info.fields) |field| {
+            inline for (reflection.fields(info)) |field| {
                 if (field.type == void and opts.matchesDeserializeName(T, field.name, name, schema)) {
                     return @unionInit(T, field.name, {});
                 }
@@ -358,7 +359,7 @@ fn deserializeUnionExternalSchema(
     var map = try deserializer.deserializeStruct(T);
     const key = (try map.nextKey(allocator)) orelse return deserializer.raiseError(error.MissingField);
 
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (opts.matchesDeserializeName(T, field.name, key, schema)) {
             if (field.type == void) {
                 try map.skipValue();
@@ -398,7 +399,7 @@ fn deserializeUnionInternalSchema(
 
     const name = tag_name orelse return deserializer.raiseError(error.MissingField);
 
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (opts.matchesDeserializeName(T, field.name, name, schema)) {
             if (field.type == void) {
                 while (try map.nextKey(allocator)) |_| {
@@ -412,10 +413,10 @@ fn deserializeUnionInternalSchema(
                 @compileError("Internal tagging requires struct payloads for " ++ field.name);
 
             var result: field.type = undefined;
-            var fields_seen = std.StaticBitSet(payload_info.@"struct".fields.len).initEmpty();
+            var fields_seen = std.StaticBitSet(reflection.fields(payload_info.@"struct").len).empty;
             errdefer freeStructFields(field.type, &result, fields_seen, allocator);
 
-            inline for (payload_info.@"struct".fields, 0..) |sf, i| {
+            inline for (reflection.fields(payload_info.@"struct"), 0..) |sf, i| {
                 if (comptime sf.defaultValue()) |dv| {
                     @field(result, sf.name) = dv;
                     fields_seen.set(i);
@@ -424,7 +425,7 @@ fn deserializeUnionInternalSchema(
 
             while (try map.nextKey(allocator)) |field_key| {
                 var matched = false;
-                inline for (payload_info.@"struct".fields, 0..) |sf, i| {
+                inline for (reflection.fields(payload_info.@"struct"), 0..) |sf, i| {
                     if (std.mem.eql(u8, field_key, sf.name)) {
                         @field(result, sf.name) = try map.nextValue(sf.type, allocator);
                         fields_seen.set(i);
@@ -434,7 +435,7 @@ fn deserializeUnionInternalSchema(
                 if (!matched) try map.skipValue();
             }
 
-            inline for (payload_info.@"struct".fields, 0..) |sf, i| {
+            inline for (reflection.fields(payload_info.@"struct"), 0..) |sf, i| {
                 if (!fields_seen.isSet(i)) {
                     if (@typeInfo(sf.type) == .optional) {
                         @field(result, sf.name) = null;
@@ -473,7 +474,7 @@ fn deserializeUnionAdjacentSchema(
         } else if (std.mem.eql(u8, key, content_field)) {
             const name = tag_name orelse return deserializer.raiseError(error.UnexpectedToken);
             found_content = true;
-            inline for (info.fields) |field| {
+            inline for (reflection.fields(info)) |field| {
                 if (opts.matchesDeserializeName(T, field.name, name, schema)) {
                     if (field.type == void) {
                         try map.skipValue();
@@ -493,7 +494,7 @@ fn deserializeUnionAdjacentSchema(
 
     if (tag_name) |name| {
         if (!found_content) {
-            inline for (info.fields) |field| {
+            inline for (reflection.fields(info)) |field| {
                 if (field.type == void and opts.matchesDeserializeName(T, field.name, name, schema))
                     return @unionInit(T, field.name, {});
             }
@@ -567,7 +568,7 @@ fn deserializeUnionUntaggedSchema(
 ) @TypeOf(deserializer.*).Error!T {
     const info = @typeInfo(T).@"union";
 
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         const saved = deserializer.*;
         if (field.type == void) {
             if (deserializer.deserializeVoid()) {
@@ -663,7 +664,7 @@ const MockDeserializer = struct {
     pub fn deserializeOptional(_: *MockDeserializer, comptime _: type, _: Allocator) Error!void {}
 
     pub fn deserializeEnum(_: *MockDeserializer, comptime T: type) Error!T {
-        return @enumFromInt(0);
+        return @fromBackingInt(@intCast(0));
     }
 
     pub fn deserializeUnion(_: *MockDeserializer, comptime _: type, _: Allocator) Error!void {}

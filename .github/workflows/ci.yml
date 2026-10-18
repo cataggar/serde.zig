@@ -14,14 +14,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        zig: ["0.15.2", "0.16.0", "master"]
-    continue-on-error: ${{ matrix.zig == 'master' }}
+        zig: ["0.17.0"]
     steps:
       - uses: actions/checkout@v4
 
-      - uses: mlugg/setup-zig@v2
+      - name: Install Zig via ghr
+        uses: cataggar/ghr/actions/install@v0.7.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          version: ${{ matrix.zig }}
+          tools: |
+            cataggar/zig@v0.17.0 RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
 
       - name: Check formatting
         run: zig fmt --check src/ bench/ build.zig
@@ -41,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        zig: ["0.15.2", "0.16.0"]
+        zig: ["0.17.0"]
     steps:
       - uses: actions/checkout@v4
 
@@ -51,17 +54,21 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           path: serde-base
 
-      - uses: mlugg/setup-zig@v2
+      - name: Install Zig via ghr
+        uses: cataggar/ghr/actions/install@v0.7.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          version: ${{ matrix.zig }}
+          tools: |
+            cataggar/zig@v0.17.0 RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
 
       - name: Prepare benchmark baseline
         shell: bash
         run: |
           baseline="benchmark-baseline-${{ matrix.zig }}.json"
           if [ "${{ github.event_name }}" = "pull_request" ] && [ -d serde-base ]; then
-            if (cd serde-base && zig build -l | grep -q '^  bench'); then
-              (cd serde-base && zig build bench -- --format json --compare std_json --out "../$baseline")
+            if (cd serde-base && zig build -l | grep -q '^  bench') && (cd serde-base && zig build bench -- --format json --compare std_json --out "../$baseline"); then
+              :
             else
               printf '{"schema_version":1,"results":[]}\n' > "$baseline"
             fi
@@ -109,9 +116,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: mlugg/setup-zig@v2
+      - name: Install Zig via ghr
+        uses: cataggar/ghr/actions/install@v0.7.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          version: 0.16.0
+          tools: |
+            cataggar/zig@v0.17.0 RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
 
       - name: Build docs
         run: zig build docs

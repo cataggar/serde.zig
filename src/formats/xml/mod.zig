@@ -11,6 +11,7 @@
 //! when modelled as `struct { Blobs: struct { Blob: []const Blob } }`.
 
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const compat = @import("compat");
 const serializer_mod = @import("serializer.zig");
 const deserializer_mod = @import("deserializer.zig");
@@ -128,6 +129,7 @@ fn xmlSerialize(
     opts: Options,
     comptime schema: anytype,
 ) !void {
+    @setEvalBranchQuota(1_000_000);
     if (opts.xml_declaration) {
         writer.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>") catch return error.WriteFailed;
         if (opts.pretty) writer.writeByte('\n') catch return error.WriteFailed;
@@ -166,7 +168,7 @@ fn writeStructElement(
     writer.writeAll(root_name) catch return error.WriteFailed;
 
     // Attributes: fields marked with xml_attribute.
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime opt.shouldSkipFieldSchema(T, field.name, .serialize, schema)) continue;
         if (comptime isXmlAttribute(T, field.name, schema)) {
             writer.writeByte(' ') catch return error.WriteFailed;
@@ -182,21 +184,41 @@ fn writeStructElement(
 
     writer.writeByte('>') catch return error.WriteFailed;
 
+    // Text content: a field marked xml_text is written as the element's text.
+    inline for (reflection.fields(info)) |field| {
+        if (comptime isXmlText(T, field.name, schema)) {
+            const tv = @field(value, field.name);
+            const TInfo = @typeInfo(field.type);
+            if (TInfo == .optional) {
+                if (tv) |inner| {
+                    var tbuf: [64]u8 = undefined;
+                    const s = fieldToString(TInfo.optional.child, inner, &tbuf);
+                    xml_writer.writeXmlEscaped(writer, s) catch return error.WriteFailed;
+                }
+            } else {
+                var tbuf: [64]u8 = undefined;
+                const s = fieldToString(field.type, tv, &tbuf);
+                xml_writer.writeXmlEscaped(writer, s) catch return error.WriteFailed;
+            }
+        }
+    }
+
     // Children: non-attribute fields.
     var ser = serializer_mod.Serializer.init(writer, opts);
     if (opts.pretty) ser.depth = 1;
     var ss = try ser.beginStruct();
 
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime opt.shouldSkipFieldSchema(T, field.name, .serialize, schema)) continue;
         if (comptime isXmlAttribute(T, field.name, schema)) continue;
+        if (comptime isXmlText(T, field.name, schema)) continue;
 
         if (comptime opt.isFlattenedFieldSchema(T, field.name, schema)) {
             if (@typeInfo(field.type) != .@"struct")
                 @compileError("Flatten requires a struct type, got " ++ @typeName(field.type));
             const nested = @field(value, field.name);
             const nested_info = @typeInfo(field.type).@"struct";
-            inline for (nested_info.fields) |sf| {
+            inline for (reflection.fields(nested_info)) |sf| {
                 const nested_wire = comptime opt.wireFieldNameForDir(field.type, sf.name, {}, .serialize);
                 try ss.serializeField(nested_wire, @field(nested, sf.name));
             }
@@ -234,6 +256,11 @@ fn writeStructElement(
 }
 
 fn fieldToString(comptime T: type, value: T, buf: *[64]u8) []const u8 {
+    const tinfo = @typeInfo(T);
+    if (tinfo == .optional) {
+        if (value) |inner| return fieldToString(tinfo.optional.child, inner, buf);
+        return "";
+    }
     const k = comptime kind_mod.typeKind(T);
     return switch (k) {
         .bool => if (value) "true" else "false",
@@ -277,12 +304,26 @@ fn isXmlNameChar(c: u8) bool {
     return isXmlNameStart(c) or (c >= '0' and c <= '9') or c == '-' or c == '.';
 }
 
+fn isXmlText(comptime T: type, comptime field_name: []const u8, comptime schema: anytype) bool {
+    const S = @TypeOf(schema);
+    if (S != void) {
+        if (@hasField(S, "xml_text")) {
+            return std.mem.eql(u8, @tagName(schema.xml_text), field_name);
+        }
+    }
+    if (!opt.hasSerdeOptions(T)) return false;
+    const serde = T.serde;
+    const SerdeTy = @TypeOf(serde);
+    if (!@hasField(SerdeTy, "xml_text") and !@hasDecl(SerdeTy, "xml_text")) return false;
+    return std.mem.eql(u8, @tagName(serde.xml_text), field_name);
+}
+
 fn isXmlAttribute(comptime T: type, comptime field_name: []const u8, comptime schema: anytype) bool {
     const S = @TypeOf(schema);
     if (S != void) {
         if (@hasField(S, "xml_attribute")) {
             const attrs = schema.xml_attribute;
-            const attr_fields = @typeInfo(@TypeOf(attrs)).@"struct".fields;
+            const attr_fields = reflection.fields(@typeInfo(@TypeOf(attrs)).@"struct");
             inline for (attr_fields) |f| {
                 const val = @field(attrs, f.name);
                 const tag_name = @tagName(val);
@@ -296,7 +337,7 @@ fn isXmlAttribute(comptime T: type, comptime field_name: []const u8, comptime sc
     const SerdeTy = @TypeOf(serde);
     if (!@hasField(SerdeTy, "xml_attribute") and !@hasDecl(SerdeTy, "xml_attribute")) return false;
     const attrs = serde.xml_attribute;
-    const attr_fields = @typeInfo(@TypeOf(attrs)).@"struct".fields;
+    const attr_fields = reflection.fields(@typeInfo(@TypeOf(attrs)).@"struct");
     inline for (attr_fields) |f| {
         const val = @field(attrs, f.name);
         const tag_name = @tagName(val);
@@ -313,6 +354,7 @@ fn xmlDeserialize(
     borrow: bool,
     comptime schema: anytype,
 ) !T {
+    @setEvalBranchQuota(1_000_000);
     var scanner = scanner_mod.Scanner{ .input = input };
 
     const k = comptime kind_mod.typeKind(T);
@@ -359,7 +401,7 @@ fn xmlDeserialize(
 fn initStructDefaults(comptime T: type, comptime schema: anytype) !T {
     const info = @typeInfo(T).@"struct";
     var result: T = undefined;
-    inline for (info.fields) |field| {
+    inline for (reflection.fields(info)) |field| {
         if (comptime field.defaultValue()) |dv| {
             @field(result, field.name) = dv;
         } else if (comptime opt.hasSerdeDefaultSchema(T, field.name, schema)) {
@@ -595,6 +637,46 @@ test "roundtrip with string entities" {
     const bytes = try toSliceWith(arena.allocator(), original, .{ .xml_declaration = false });
     const result = try fromSlice(Msg, arena.allocator(), bytes);
     try testing.expectEqualStrings("a<b&c>d", result.text);
+}
+
+test "deserialize xml_text with optional attribute" {
+    const BlobName = struct {
+        encoded: ?bool = null,
+        content: ?[]const u8 = null,
+        pub const serde = .{
+            .xml_root = "BlobName",
+            .xml_attribute = .{.encoded},
+            .xml_text = .content,
+            .rename = .{ .encoded = "Encoded" },
+        };
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const val = try fromSlice(BlobName, a, "<BlobName Encoded=\"true\">my&amp;blob.txt</BlobName>");
+    try testing.expectEqual(true, val.encoded.?);
+    try testing.expectEqualStrings("my&blob.txt", val.content.?);
+}
+
+test "roundtrip xml_text" {
+    const Named = struct {
+        encoded: ?bool = null,
+        content: ?[]const u8 = null,
+        pub const serde = .{
+            .xml_root = "Name",
+            .xml_attribute = .{.encoded},
+            .xml_text = .content,
+            .rename = .{ .encoded = "Encoded" },
+        };
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const original = Named{ .encoded = true, .content = "hello.txt" };
+    const bytes = try toSliceWith(a, original, .{ .xml_declaration = false });
+    const result = try fromSlice(Named, a, bytes);
+    try testing.expectEqual(true, result.encoded.?);
+    try testing.expectEqualStrings("hello.txt", result.content.?);
 }
 
 test "roundtrip with xml_root and xml_attribute" {
@@ -1056,4 +1138,37 @@ test "schema: top-level untagged union deserializes" {
     defer arena.deinit();
     const value = try fromSliceSchema(Scalar, arena.allocator(), "<value>hello</value>", schema);
     try testing.expectEqualStrings("hello", value.string);
+}
+
+test "deserialize element after wrapped struct-slice" {
+    // A struct field whose last member is a slice of structs (a "wrapper"
+    // element containing repeated child structs), followed by a sibling
+    // element. Regression: `readSliceItem` used to consume the wrapper's
+    // closing tag after the last struct item, dropping the trailing sibling
+    // (e.g. Azure blob listing: `<Containers>...</Containers><NextMarker>`).
+    const Item = struct {
+        name: []const u8,
+        pub const serde = .{ .rename = .{ .name = "Name" } };
+    };
+    const Wrap = struct {
+        item: []const Item = &.{},
+        pub const serde = .{ .rename = .{ .item = "Item" } };
+    };
+    const Root = struct {
+        wrap: Wrap = .{},
+        tail: ?[]const u8 = null,
+        pub const serde = .{ .rename = .{ .wrap = "Wrap", .tail = "Tail" } };
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const xml =
+        "<Root><Wrap><Item><Name>a</Name></Item>" ++
+        "<Item><Name>b</Name></Item></Wrap><Tail>done</Tail></Root>";
+    const r = try fromSlice(Root, arena.allocator(), xml);
+    try testing.expectEqual(@as(usize, 2), r.wrap.item.len);
+    try testing.expectEqualStrings("a", r.wrap.item[0].name);
+    try testing.expectEqualStrings("b", r.wrap.item[1].name);
+    try testing.expect(r.tail != null);
+    try testing.expectEqualStrings("done", r.tail.?);
 }

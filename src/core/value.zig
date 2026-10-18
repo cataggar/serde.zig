@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const kind_mod = @import("kind.zig");
 const serialize_mod = @import("serialize.zig");
 
@@ -103,7 +104,7 @@ pub const Value = union(enum) {
             },
             .@"struct" => {
                 const info = @typeInfo(T).@"struct";
-                var entries = try allocator.alloc(Entry, info.fields.len);
+                var entries = try allocator.alloc(Entry, reflection.fields(info).len);
                 errdefer {
                     for (entries) |e| {
                         allocator.free(e.key);
@@ -111,7 +112,7 @@ pub const Value = union(enum) {
                     }
                     allocator.free(entries);
                 }
-                inline for (info.fields, 0..) |field, i| {
+                inline for (reflection.fields(info), 0..) |field, i| {
                     const key = try allocator.alloc(u8, field.name.len);
                     @memcpy(key, field.name);
                     entries[i] = .{
@@ -123,7 +124,7 @@ pub const Value = union(enum) {
             },
             .@"union" => {
                 const info = @typeInfo(T).@"union";
-                inline for (info.fields) |field| {
+                inline for (reflection.fields(info)) |field| {
                     if (value == @field(T, field.name)) {
                         if (field.type == void) {
                             const key = try allocator.alloc(u8, field.name.len);
@@ -146,12 +147,12 @@ pub const Value = union(enum) {
             },
             .tuple => {
                 const info = @typeInfo(T).@"struct";
-                var arr = try allocator.alloc(Value, info.fields.len);
+                var arr = try allocator.alloc(Value, reflection.fields(info).len);
                 errdefer {
                     for (arr) |a| a.deinit(allocator);
                     allocator.free(arr);
                 }
-                inline for (info.fields, 0..) |field, i| {
+                inline for (reflection.fields(info), 0..) |field, i| {
                     arr[i] = try fromAny(field.type, @field(value, field.name), allocator);
                 }
                 return .{ .array = arr };
@@ -230,9 +231,9 @@ pub const Value = union(enum) {
             },
             .@"enum" => return switch (self) {
                 .string => |s| {
-                    inline for (@typeInfo(T).@"enum".fields) |field| {
+                    inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
                         if (std.mem.eql(u8, s, field.name))
-                            return @enumFromInt(field.value);
+                            return @fromBackingInt(@intCast(field.value));
                     }
                     return error.UnknownVariant;
                 },
@@ -243,7 +244,7 @@ pub const Value = union(enum) {
                 switch (self) {
                     .object => |entries| {
                         var result: T = undefined;
-                        inline for (info.fields) |field| {
+                        inline for (reflection.fields(info)) |field| {
                             var found = false;
                             for (entries) |e| {
                                 if (std.mem.eql(u8, e.key, field.name)) {
@@ -310,9 +311,9 @@ pub const Value = union(enum) {
                 const info = @typeInfo(T).@"struct";
                 switch (self) {
                     .array => |arr| {
-                        if (arr.len != info.fields.len) return error.WrongType;
+                        if (arr.len != reflection.fields(info).len) return error.WrongType;
                         var result: T = undefined;
-                        inline for (info.fields, 0..) |field, i| {
+                        inline for (reflection.fields(info), 0..) |field, i| {
                             @field(result, field.name) = try arr[i].toType(field.type, allocator);
                         }
                         return result;
@@ -327,7 +328,7 @@ pub const Value = union(enum) {
                     .object => |entries| {
                         if (entries.len != 1) return error.WrongType;
                         const name = entries[0].key;
-                        inline for (info.fields) |field| {
+                        inline for (reflection.fields(info)) |field| {
                             if (std.mem.eql(u8, name, field.name)) {
                                 if (field.type == void) {
                                     return @unionInit(T, field.name, {});
@@ -341,7 +342,7 @@ pub const Value = union(enum) {
                     },
                     // Void variant as bare string.
                     .string => |s| {
-                        inline for (info.fields) |field| {
+                        inline for (reflection.fields(info)) |field| {
                             if (field.type == void and std.mem.eql(u8, s, field.name)) {
                                 return @unionInit(T, field.name, {});
                             }

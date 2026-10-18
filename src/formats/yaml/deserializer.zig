@@ -1,4 +1,5 @@
 const std = @import("std");
+const reflection = @import("compat").reflection;
 const compat = @import("compat");
 const parser_mod = @import("parser.zig");
 const core_deserialize = @import("../../core/deserialize.zig");
@@ -66,9 +67,9 @@ pub const Deserializer = struct {
             return compat.intToEnum(T, int_val) orelse return error.UnexpectedToken;
         }
         if (self.value.* != .string) return error.WrongType;
-        inline for (@typeInfo(T).@"enum".fields) |field| {
+        inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
             if (std.mem.eql(u8, self.value.string, field.name))
-                return @enumFromInt(field.value);
+                return @fromBackingInt(@intCast(field.value));
         }
         return error.UnexpectedToken;
     }
@@ -200,9 +201,9 @@ fn deserializeValue(comptime T: type, val: *const Value, allocator: Allocator) D
                 return compat.intToEnum(T, int_val) orelse return error.UnexpectedToken;
             }
             if (val.* != .string) return error.WrongType;
-            inline for (@typeInfo(T).@"enum".fields) |field| {
+            inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
                 if (std.mem.eql(u8, val.string, field.name))
-                    return @enumFromInt(field.value);
+                    return @fromBackingInt(@intCast(field.value));
             }
             return error.UnexpectedToken;
         },
@@ -261,7 +262,7 @@ fn deserializeUnionFromValue(val: *const Value, comptime T: type, allocator: All
 
     // Void variants from string.
     if (val.* == .string) {
-        inline for (info.fields) |field| {
+        inline for (reflection.fields(info)) |field| {
             if (field.type == void and std.mem.eql(u8, val.string, field.name)) {
                 return @unionInit(T, field.name, {});
             }
@@ -276,7 +277,7 @@ fn deserializeUnionFromValue(val: *const Value, comptime T: type, allocator: All
         const entry = it.next().?;
         const variant_name = entry.key_ptr.*;
 
-        inline for (info.fields) |field| {
+        inline for (reflection.fields(info)) |field| {
             if (std.mem.eql(u8, variant_name, field.name)) {
                 if (field.type == void) {
                     return @unionInit(T, field.name, {});
@@ -334,9 +335,9 @@ const ValueDeserializer = struct {
 
     pub fn deserializeEnum(self: *ValueDeserializer, comptime T: type) Error!T {
         if (self.val.* != .string) return error.WrongType;
-        inline for (@typeInfo(T).@"enum".fields) |field| {
+        inline for (reflection.fields(@typeInfo(T).@"enum")) |field| {
             if (std.mem.eql(u8, self.val.string, field.name))
-                return @enumFromInt(field.value);
+                return @fromBackingInt(@intCast(field.value));
         }
         return error.UnexpectedToken;
     }
