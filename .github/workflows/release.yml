@@ -15,10 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: mlugg/setup-zig@v2
+      - name: Install Zig via ghr
+        uses: cataggar/ghr/actions/install@v0.7.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # Releases are cut from the stable compatibility target documented in README.md.
-          version: 0.15.2
+          tools: |
+            cataggar/zig@v0.17.0 RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
 
       - name: Run tests
         run: zig build test
